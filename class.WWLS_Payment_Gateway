@@ -1,0 +1,238 @@
+<?php
+
+/**
+ * Payment Gateway for ww loyalty system
+ *
+ * @author wojciechwierzgacz
+ */
+class WWLS_Payment_Gateway extends WC_Payment_Gateway {
+    private $user_points;
+    private $user_points_value;
+    
+    public function __construct() {
+      $this->id = 'wwls';
+      $this->medthod_title = 'Loyalty System';
+      $this->has_fields = false;
+ 
+      $this->init_form_fields();
+      $this->init_settings();
+ 
+      $this->title = $this->settings['title'];
+      $this->description = $this->settings['description'];
+      $this->redirect_page_id = $this->settings['redirect_page_id'];
+ 
+      $this->msg['message'] = "";
+      $this->msg['class'] = "";
+ 
+      $this->user_points = WWLS_Points::get();
+      $this->user_points_value = WWLS_Points::convertPointsToCurrency($this->user_points);
+        
+      if ( version_compare( WOOCOMMERCE_VERSION, '2.0.0', '>=' ) ) {
+                add_action( 'woocommerce_update_options_payment_gateways_' . $this->id, array( &$this, 'process_admin_options' ) );
+             } else {
+                add_action( 'woocommerce_update_options_payment_gateways', array( &$this, 'process_admin_options' ) );
+            }
+            
+      add_action('woocommerce_receipt_wwls', array(&$this, 'receipt_page'));
+      add_action('init', array(&$this, 'wwls_proccess_payment'));
+
+    }
+    
+    function init_form_fields(){
+ 
+       $this->form_fields = array(
+                'enabled' => array(
+                    'title' => __('Włącz/Wyłącz', 'mrova'),
+                    'type' => 'checkbox',
+                    'label' => __('Włacz płatność punktami.', 'mrova'),
+                    'default' => 'no'),
+                'title' => array(
+                    'title' => __('Nazwa:', 'mrova'),
+                    'type'=> 'text',
+                    'description' => __('Nazwa metody płatności którą widzą użytkownicy na stronie zamówienia.', 'mrova'),
+                    'default' => __('Płać Punktami', 'mrova')),
+                'description' => array(
+                    'title' => __('Opis:', 'mrova'),
+                    'type' => 'textarea',
+                    'description' => __('Opis który widzą użytkownicy na stronie zamówienia.', 'mrova'),
+                    'default' => __('Kupuj przy pomocy punktów lojalnościowych.', 'mrova')),
+                'redirect_page_id' => array(
+                    'title' => __('Strona powrotu'),
+                    'type' => 'select',
+                    'options' => $this->get_pages('Wybierz'),
+                    'description' => "Strona na która użytkownik zostanie przekierowany po dokonaniu płatności"
+                )
+            );
+    }
+ 
+       public function admin_options(){
+        echo '<h3>'.__('Płatność puntami lojalnościowymi', 'mrova').'</h3>';
+        echo '<table class="form-table">';
+        // Generate the HTML For the settings form.
+        $this->generate_settings_html();
+        echo '</table>';
+ 
+    }
+ 
+    /**
+     *  There are no payment fields for payu, but we want to show the description if set.
+     **/
+    function payment_fields(){
+        if($this->description) echo wpautop(wptexturize($this->description));
+        
+
+        echo "Masz <b>{$this->user_points}</b> punktów co w przeliczeniu na złotówki daje: <b>{$this->user_points_value} zł</b>";
+    }
+    /**
+     * Receipt Page
+     **/
+    function receipt_page($order_id){ 
+        $order = new WC_Order($order_id);
+        $total = (float) $order->get_total();
+        echo "Masz <b>{$this->user_points}</b> punktów co w przeliczeniu na złotówki daje: <b>{$this->user_points_value} zł</b>";
+       
+        if($total <= $this->user_points_value) {
+            echo '<p>'.__('Dziękujemy za zamówienie. Naciśnij przycisk poniżej aby zapłacić punktami', 'mrova').'</p>';
+            echo $this->generate_wwls_form($order_id);  
+            $this->wwls_proccess_payment();
+        } else {
+            echo '<p>'.__('Niestety masz za mało punktów aby dokończyć to zamówienie', 'mrova').'</p>';
+            echo '<a class="button cancel" href="'.$order->get_cancel_order_url().'">'.__('Anuluj i wróć do koszyka', 'mrova').'</a>';
+        }
+
+    }
+    /**
+     * Generate payu button link
+     **/
+    public function generate_wwls_form($order_id){
+ 
+        global $woocommerce;
+ 
+        $order = new WC_Order($order_id);
+        $txnid = $order_id.'_'.date("ymds");
+ 
+        $redirect_url = ($this->redirect_page_id=="" || $this->redirect_page_id==0)?get_site_url() . "/":get_permalink($this->redirect_page_id);
+ 
+        $productinfo = "Order $order_id";
+ 
+        $wwls_args_array = array(
+          'wwlsprocess' => '1',
+          'txnid' => $txnid,
+          'amount' => $order->order_total,
+          'productinfo' => $productinfo,
+          'firstname' => $order->billing_first_name,
+          'lastname' => $order->billing_last_name,
+          'address1' => $order->billing_address_1,
+          'address2' => $order->billing_address_2,
+          'city' => $order->billing_city,
+          'state' => $order->billing_state,
+          'country' => $order->billing_country,
+          'zipcode' => $order->billing_zip,
+          'email' => $order->billing_email,
+          'phone' => $order->billing_phone,
+          'surl' => $redirect_url,
+          'furl' => $redirect_url,
+          'curl' => $redirect_url,
+          'pg' => 'NB'
+          );
+ 
+        $wwls_array = array();
+        foreach($wwls_args_array as $key => $value){
+          $wwls_array[] = "<input type='hidden' name='$key' value='$value'/>";
+        }
+        
+        return '<form action="" method="post" id="wwls_payment_form">
+            ' . implode('', $wwls_array) . '
+            <input type="submit" class="button-alt" id="submit_wwls_payment_form" value="'.__('Zapłać', 'mrova').'" /> <a class="button cancel" href="'.$order->get_cancel_order_url().'">'.__('Anuluj i wróć do koszyka', 'mrova').'</a>
+            
+            </form>';
+ 
+ 
+    }
+    /**
+     * Process the payment and return the result
+     **/
+    function process_payment($order_id){
+        $order = new WC_Order($order_id);
+  
+        return array('result' => 'success', 'redirect' => add_query_arg('order-pay',
+            $order->id, add_query_arg('key', $order->order_key, get_permalink(woocommerce_get_page_id('pay' )))
+        ));
+    }
+ 
+    /**
+     * Check for valid payu server callback
+     **/
+    function wwls_proccess_payment() {
+        global $woocommerce;
+
+        if(isset($_REQUEST['txnid']) && isset($_REQUEST['wwlsprocess'])){
+            $order_id_time = $_REQUEST['txnid'];
+            $order_id = explode('_', $_REQUEST['txnid']);
+            $order_id = (int)$order_id[0];
+
+            if($order_id != ''){
+                try{
+                    $order = new WC_Order($order_id);
+                    $merchant_id = $_REQUEST['key'];
+ 
+                    $productinfo = "Order $order_id";
+                    if($order->status !=='completed'){
+                          
+                                $transauthorised = true;
+                                $this->msg['message'] = "Dziękujemy za zakupy w naszym sklepie.";
+                                $this->msg['class'] = 'woocommerce_message';
+                                if($order->status == 'processing'){
+ 
+                                }else{
+                                    WWLS_Points::pay($order->order_total);
+
+                                    $order->payment_complete();
+                                    $order->add_order_note("Zapłacono punktami");
+                                    $order->add_order_note($this->msg['message']);
+                                    $woocommerce->cart->empty_cart();
+                                }
+                            
+
+                        wp_redirect($_REQUEST['surl']);
+                    }}catch(Exception $e){
+                        // $errorOccurred = true;
+                        $msg = "Error";
+                    }
+            }
+        }
+    }
+ 
+     // get all pages
+    function get_pages($title = false, $indent = true) {
+        $wp_pages = get_pages('sort_column=menu_order');
+        $page_list = array();
+        if ($title) $page_list[] = $title;
+        foreach ($wp_pages as $page) {
+            $prefix = '';
+            // show indented child pages?
+            if ($indent) {
+                $has_parent = $page->post_parent;
+                while($has_parent) {
+                    $prefix .=  ' - ';
+                    $next_page = get_page($has_parent);
+                    $has_parent = $next_page->post_parent;
+                }
+            }
+            // add to page list array array
+            $page_list[$page->ID] = $prefix . $page->post_title;
+        }
+        return $page_list;
+    }
+    
+}
+
+   /**
+     * Add the Gateway to WooCommerce
+     **/
+    function woocommerce_add_wwls_gateway($methods) {
+        $methods[] = 'WWLS_Payment_Gateway';
+        return $methods;
+    }
+ 
+    add_filter('woocommerce_payment_gateways', 'woocommerce_add_wwls_gateway' );
